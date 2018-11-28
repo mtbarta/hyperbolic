@@ -1,0 +1,53 @@
+{
+    "task": "tagger",
+    "batchsz": 10,
+    "conll_output": "conllresults.conll",
+    "test_thresh": 10,
+    "charsz": 30,
+    "unif": 0.1,
+    "preproc": {
+        "mxlen": -1,
+        "mxwlen": -1,
+        "lower": true
+    },
+    "backend": "tensorflow",
+    "dataset": "conll-iobes",
+    "loader": {
+        "reader_type": "default"
+    },
+    "model": {
+        "model_type": "hyper",
+        "cfiltsz": [3],
+        "hsz": 200,
+        "wsz": 30,
+        "dropout": 0.5,
+        "rnntype": "rnn",
+        "layers": 1,
+        "crf_mask": false,
+        "cell_type": "rnn",
+        "crf": false,
+        "lr_words": 0.001,
+        "lr_ffnn": 0.0001,
+        "c_val": 1.0,
+        "inputs_geom": "lorentz",
+        "sent_geom": "hyp",
+        "ffnn_geom": "hyp",
+        "mlr_geom": "hyp",
+        "eucl_clip": 5,
+        "hyp_clip": 1
+    },
+    "word_embeddings": {
+        "label": "hyperbolic"
+    },
+    "train": {
+        "epochs": 100,
+        "trainer_type": "hyper",
+        "eta": 0.015,
+        "mom": 0.9,
+        "patience": 40,
+        "early_stopping_metric": "f1",
+        "clip": 5.0,
+        "span_type": "iobes"
+    }
+}
+
