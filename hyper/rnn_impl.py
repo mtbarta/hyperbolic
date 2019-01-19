@@ -3,11 +3,12 @@ import tensorflow as tf
 
 class EuclRNN(tf.nn.rnn_cell.RNNCell):
 
-    def __init__(self, num_units, dtype):
+    def __init__(self, num_units, dtype, layer):
         self._num_units = num_units
         self.built = False
         self.__dtype = dtype
         self.eucl_vars = []
+        self.layer = layer
 
     @property
     def state_size(self):
@@ -28,19 +29,19 @@ class EuclRNN(tf.nn.rnn_cell.RNNCell):
                 input_depth = inputs_shape[1].value
 
                 self.W = tf.get_variable(
-                    'W', dtype= self.__dtype,
+                    'W'+str(self.layer), dtype= self.__dtype,
                     shape=[self._num_units, self._num_units],
                     initializer=tf.contrib.layers.xavier_initializer())
                 self.eucl_vars.append(self.W)
 
                 self.U = tf.get_variable(
-                    'U', dtype= self.__dtype,
+                    'U'+str(self.layer), dtype= self.__dtype,
                     shape=[input_depth, self._num_units],
                     initializer=tf.contrib.layers.xavier_initializer())
                 self.eucl_vars.append(self.U)
 
                 self.b = tf.get_variable(
-                    'b', dtype= self.__dtype,
+                    'b'+str(self.layer), dtype= self.__dtype,
                     shape=[1, self._num_units],
                     initializer=tf.constant_initializer(0.0))
                 self.eucl_vars.append(self.b)
@@ -482,7 +483,7 @@ class HypLSTM(tf.nn.rnn_cell.RNNCell):
         with tf.variable_scope(scope or type(self).__name__):
             if not self.built:
                 inputs_shape = inputs.get_shape()
-                print('Init GRU cell')
+                print('Init LSTM cell')
                 if inputs_shape[1].value is None:
                     raise ValueError("Expected inputs.shape[-1] to be known, saw shape: %s"
                                      % inputs_shape)

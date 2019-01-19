@@ -164,55 +164,46 @@ class HyperbolicRNNModel(Classifier):
         # self.inference.saver = saver
         self.saver = saver
 
-    def _compute_word_level_loss(self, mask):
+    # def _compute_word_level_loss(self, mask):
 
-        nc = len(self.labels)
-        # Cross entropy loss
-        # cross_entropy = tf.one_hot(self.y, nc, axis=-1) * tf.log(tf.nn.softmax(self.probs))
-        # # cross_entropy = tf.nn.softmax_cross_entropy_with_logits_v2(logits=self.probs, labels=tf.one_hot(self.y, nc, axis=-1))
-        # cross_entropy = -tf.reduce_sum(cross_entropy, reduction_indices=2)
-        # cross_entropy *= mask
-        # cross_entropy = tf.reduce_sum(cross_entropy, reduction_indices=1)
-        # all_loss = tf.reduce_mean(cross_entropy, name="loss")
-        # return all_loss
-        losses = tf.nn.sparse_softmax_cross_entropy_with_logits(
-                    logits=self.probs, labels=self.y)
-        # losses = tf.boolean_mask(losses, mask)
-        return tf.reduce_mean(losses)
+    #     nc = len(self.labels)
+    #     # Cross entropy loss
+    #     # cross_entropy = tf.one_hot(self.y, nc, axis=-1) * tf.log(tf.nn.softmax(self.probs))
+    #     # # cross_entropy = tf.nn.softmax_cross_entropy_with_logits_v2(logits=self.probs, labels=tf.one_hot(self.y, nc, axis=-1))
+    #     # cross_entropy = -tf.reduce_sum(cross_entropy, reduction_indices=2)
+    #     # cross_entropy *= mask
+    #     # cross_entropy = tf.reduce_sum(cross_entropy, reduction_indices=1)
+    #     # all_loss = tf.reduce_mean(cross_entropy, name="loss")
+    #     # return all_loss
+    #     losses = tf.nn.sparse_softmax_cross_entropy_with_logits(
+    #                 logits=self.probs, labels=self.y)
+    #     # losses = tf.boolean_mask(losses, mask)
+    #     return tf.reduce_mean(losses)
 
-    def _compute_sentence_level_loss(self):
+    # def _compute_sentence_level_loss(self):
 
-        if self.crf_mask:
-            assert self.span_type is not None, "To mask transitions you need to provide a tagging span_type, choices are `IOB`, `BIO` (or `IOB2`), and `IOBES`"
-            A = tf.get_variable(
-                "transitions_raw",
-                shape=(len(self.labels), len(self.labels)),
-                dtype=tf.float64,
-                trainable=True
-            )
+    #     if self.crf_mask:
+    #         assert self.span_type is not None, "To mask transitions you need to provide a tagging span_type, choices are `IOB`, `BIO` (or `IOB2`), and `IOBES`"
+    #         A = tf.get_variable(
+    #             "transitions_raw",
+    #             shape=(len(self.labels), len(self.labels)),
+    #             dtype=tf.float64,
+    #             trainable=True
+    #         )
 
-            self.mask = crf_mask(self.labels, self.span_type, self.labels['<GO>'], self.labels['<EOS>'], self.labels.get('<PAD>'))
-            self.inv_mask = tf.cast(tf.equal(self.mask, 0), tf.float64) * tf.constant(-1e4, dtype=tf.float64)
+    #         self.mask = crf_mask(self.labels, self.span_type, self.labels['<GO>'], self.labels['<EOS>'], self.labels.get('<PAD>'))
+    #         self.inv_mask = tf.cast(tf.equal(self.mask, 0), tf.float64) * tf.constant(-1e4, dtype=tf.float64)
 
-            self.A = tf.add(tf.multiply(A, self.mask), self.inv_mask, name="transitions")
-            ll, self.A = crf.crf_log_likelihood(self.probs, self.y, self.lengths, self.A)
-        else:
-            ll, self.A = crf.crf_log_likelihood(self.probs, self.y, self.lengths)
-        return tf.reduce_mean(-ll)
+    #         self.A = tf.add(tf.multiply(A, self.mask), self.inv_mask, name="transitions")
+    #         ll, self.A = crf.crf_log_likelihood(self.probs, self.y, self.lengths, self.A)
+    #     else:
+    #         ll, self.A = crf.crf_log_likelihood(self.probs, self.y, self.lengths)
+    #     return tf.reduce_mean(-ll)
 
     def create_loss(self):
-
-        with tf.variable_scope("Loss"):
-            gold = tf.cast(self.y, tf.float64)
-            mask = tf.sign(gold)
-
-            if self.crf is True:
-                print('crf=True, creating SLL')
-                all_loss = self._compute_sentence_level_loss()
-            else:
-                print('crf=False, creating WLL')
-                all_loss = self._compute_word_level_loss(mask)
-
+        with tf.name_scope("loss"):
+            loss = tf.nn.softmax_cross_entropy_with_logits(logits=self.probs, labels=tf.cast(self.y, "float"))
+            all_loss = tf.reduce_mean(loss)
         return all_loss
 
     def get_vocab(self, vocab_type='word'):
@@ -284,6 +275,7 @@ class HyperbolicRNNModel(Classifier):
         model.pdropin_value = pdrop_in
         model.word_vocab = {}
 
+        layers = kwargs.get('layers', 1)
         inputs_geom = kwargs.get("inputs_geom", "hyp")
         bias_geom = kwargs.get("bias_geom", "hyp")
         ffnn_geom = kwargs.get("ffnn_geom", "hyp")
@@ -299,6 +291,7 @@ class HyperbolicRNNModel(Classifier):
         eucl_clip = kwargs.get("eucl_clip", 1.0)
         hyp_clip = kwargs.get("hyp_clip", 1.0)
         before_mlr_dim = kwargs.get("before_mlr_dim", nc)
+        learn_softmax = kwargs.get("learn_softmax", True)
         batch_sz = 10
         embed_sz = kwargs.get("embed_sz", 50)
 
@@ -316,13 +309,9 @@ class HyperbolicRNNModel(Classifier):
             # word_embeddings = embed(model.x, len(word_vec.vocab), word_vec.dsz,
             #                         initializer=tf.constant_initializer(word_vec.weights, dtype=tf.float32, verify_shape=True))
             with tf.variable_scope("LUT"):
-                word_init_avg_norm = 0.001
-                maxval = (3. * (word_init_avg_norm ** 2) / (2. * embed_sz)) ** (1. / 3)
-                initializer = tf.random_uniform_initializer(minval=-maxval, maxval=maxval, dtype=tf.float64)
                 W = tf.get_variable("W",
                                     dtype=tf.float64,
-                                    initializer=initializer,
-                                    # initializer=tf.constant_initializer(word_vec.weights, dtype=tf.float64, verify_shape=True),
+                                    initializer=tf.constant_initializer(word_vec.weights, dtype=tf.float64, verify_shape=True),
                                     shape=[len(word_vec.vocab), word_vec.dsz], trainable=True)
                 # e0 = tf.scatter_update(W, tf.constant(0, dtype=tf.int32, shape=[1]), tf.zeros(shape=[1, word_vec.dsz]))
                 # with tf.control_dependencies([W]):
@@ -342,8 +331,10 @@ class HyperbolicRNNModel(Classifier):
         #     embedseq = util.tf_exp_map_zero(embedseq, c_val)
         
 
+        if cell_type == 'rnn' and sent_geom == 'eucl':
+            cell_class = lambda h_dim: tf.contrib.rnn.BasicRNNCell(h_dim)
         if cell_type == 'rnn' and sent_geom == 'hyp':
-            cell_class = lambda h_dim: rnn_impl.HypRNN(num_units=h_dim,
+            cell_class = lambda h_dim, layer: rnn_impl.HypRNN(num_units=h_dim,
                                                        inputs_geom=inputs_geom,
                                                        bias_geom=bias_geom,
                                                        c_val=c_val,
@@ -351,9 +342,10 @@ class HyperbolicRNNModel(Classifier):
                                                        fix_biases=False,
                                                        fix_matrices=False,
                                                        matrices_init_eye=False,
-                                                       dtype=tf.float64)
+                                                       dtype=tf.float64,
+                                                       layer=layer)
         elif cell_type == 'gru' and sent_geom == 'hyp':
-            cell_class = lambda h_dim: rnn_impl.HypGRU(num_units=h_dim,
+            cell_class = lambda h_dim, layer: rnn_impl.HypGRU(num_units=h_dim,
                                                        inputs_geom=inputs_geom,
                                                        bias_geom=bias_geom,
                                                        c_val=c_val,
@@ -361,60 +353,79 @@ class HyperbolicRNNModel(Classifier):
                                                        fix_biases=False,
                                                        fix_matrices=False,
                                                        matrices_init_eye=False,
-                                                       dtype=tf.float64)
+                                                       dtype=tf.float64,
+                                                       layer=layer)
+        elif cell_type == 'lstm' and sent_geom == 'hyp':
+            cell_class = lambda h_dim, layer: rnn_impl.HypLSTM(num_units=h_dim,
+                                                       inputs_geom=inputs_geom,
+                                                       bias_geom=bias_geom,
+                                                       c_val=c_val,
+                                                       non_lin=cell_non_lin,
+                                                       fix_biases=False,
+                                                       fix_matrices=False,
+                                                       matrices_init_eye=True,
+                                                       dtype=tf.float64,
+                                                       layer=layer)
         
-        if rnntype == 'rnn':
-            cell = cell_class(hsz)
-            initial_state = cell.zero_state(batch_sz, tf.float64)
+        rnnout = embedseq
+        for i in range(layers):
+            with tf.variable_scope('rnnLayers', reuse=tf.AUTO_REUSE):
+                if rnntype == 'rnn':
+                    cell = cell_class(hsz, i)
+                    initial_state = cell.zero_state(batch_sz, tf.float64)
 
-            eucl_vars += cell.eucl_vars
-            if sent_geom == 'hyp':
-                hyp_vars += cell.hyp_vars
+                    # rnnout = tf.contrib.rnn.DropoutWrapper(cell)
+                    rnnout, state = tf.nn.dynamic_rnn(cell,
+                                                    rnnout, \
+                                                    sequence_length=model.lengths,
+                                                    initial_state=initial_state,
+                                                    dtype=tf.float64)
 
-            # rnnout = tf.contrib.rnn.DropoutWrapper(cell)
-            rnnout, state = tf.nn.dynamic_rnn(cell,
-                                              embedseq, \
-                                              sequence_length=model.lengths,
-                                              initial_state=initial_state,
-                                              dtype=tf.float64)
-        elif rnntype == 'bi':
-            cell_1 = cell_class(hsz)
-            cell_2 = cell_class(hsz)
+                    eucl_vars += cell.eucl_vars
+                    if sent_geom == 'hyp':
+                        hyp_vars += cell.hyp_vars
 
-            init_fw = cell_1.zero_state(batch_sz, tf.float64)
-            init_bw = cell_2.zero_state(batch_sz, tf.flaot64)
+                elif rnntype == 'bi':
+                    cell_1 = cell_class(hsz, i)
+                    cell_2 = cell_class(hsz, i)
 
-            eucl_vars += cell_1.eucl_vars + cell_2.eucl_vars
-            if sent_geom == 'hyp':
-                hyp_vars += cell_1.hyp_vars + cell_2.hyp_vars
+                    init_fw = cell_1.zero_state(batch_sz, tf.float64)
+                    init_bw = cell_2.zero_state(batch_sz, tf.float64)
 
-            rnnout, state = tf.nn.bidirectional_dynamic_rnn(cell_1, 
-                                                            cell_2, 
-                                                            embedseq,
-                                                            initial_state_fw=init_fw,
-                                                            initial_state_bw=init_bw,
-                                                            sequence_length=model.lengths,
-                                                            dtype=tf.float64)
-            rnnout = tf.concat(axis=2, values=rnnout)
-        else:
-            cell = cell_class(hsz)
 
-            eucl_vars += cell.eucl_vars
-            if sent_geom == 'hyp':
-                hyp_vars += cell.hyp_vars
+                    rnnout, state = tf.nn.bidirectional_dynamic_rnn(cell_1, 
+                                                                    cell_2, 
+                                                                    rnnout,
+                                                                    initial_state_fw=init_fw,
+                                                                    initial_state_bw=init_bw,
+                                                                    sequence_length=model.lengths,
+                                                                    dtype=tf.float64)
+                    rnnout = tf.concat(axis=2, values=rnnout)
 
-                
-            # rnnout = tf.contrib.rnn.DropoutWrapper(cell)
-            rnnout, state = tf.nn.dynamic_rnn(cell, embedseq, sequence_length=model.lengths, dtype=tf.float64)
+                    eucl_vars += cell_1.eucl_vars + cell_2.eucl_vars
+                    if sent_geom == 'hyp':
+                        hyp_vars += cell_1.hyp_vars + cell_2.hyp_vars
+
+                else:
+                    cell = cell_class(hsz)
+   
+                    # rnnout = tf.contrib.rnn.DropoutWrapper(cell)
+                    rnnout, state = tf.nn.dynamic_rnn(cell, rnnout, sequence_length=model.lengths, dtype=tf.float64)
+
+                    eucl_vars += cell.eucl_vars
+                    if sent_geom == 'hyp':
+                        hyp_vars += cell.hyp_vars
+
         # rnnout = tf.Print(rnnout, [rnnout], message="rnnout")
 
         tf.summary.histogram('RNN/rnnout', rnnout)
+        tf.summary.histogram('RNN/state', state)
 
         # # Converts seq to tensor, back to (B,T,W)
         hout = rnnout.get_shape()[-1]
         print(rnnout.get_shape())
         # # Flatten from [B x T x H] - > [BT x H]
-        rnnout_bt_x_h = tf.reshape(rnnout, [-1, hout])
+        rnnout_bt_x_h = tf.reshape(state, [-1, hout])
         # rnnout_bt_x_h = tf.Print(rnnout_bt_x_h, [rnnout_bt_x_h], message="rnnout_bt_x_h")
 
         ################## first feed forward layer ###################
@@ -437,7 +448,7 @@ class HyperbolicRNNModel(Classifier):
 
         hyp_vars += [b_ff]
 
-        ffnn_s1 = util.tf_mob_mat_mul(W_ff_s1, state, c_val)
+        ffnn_s1 = util.tf_mob_mat_mul(W_ff_s1, rnnout_bt_x_h, c_val)
         tf.summary.histogram("ffnn_s1", ffnn_s1)
 
         output_ffnn = util.tf_mob_add(ffnn_s1, b_ff, c_val)
@@ -459,43 +470,53 @@ class HyperbolicRNNModel(Classifier):
         
         # ################## MLR ###################
         # # output_ffnn is batch_size x before_mlr_dim
+        if not learn_softmax:
+            probs = output_ffnn
+        else:
+            print("learning softmax in hyperbolic space")
+            A_mlr = []
+            P_mlr = []
+            logits_list = []
+            dtype=tf.float64
 
-        A_mlr = []
-        P_mlr = []
-        logits_list = []
-        dtype=tf.float64
+            print('output shape', output_ffnn.get_shape())
 
-        for cl in range(nc):
-            with tf.variable_scope('mlp'):
-                A_mlr.append(tf.get_variable('A_mlr' + str(cl),
-                                            dtype=dtype,
-                                            shape=[1, before_mlr_dim],
-                                            initializer=tf.contrib.layers.xavier_initializer()))
-                eucl_vars += [A_mlr[cl]]
 
-                P_mlr.append(tf.get_variable('P_mlr' + str(cl),
-                                            dtype=dtype,
-                                            shape=[1, before_mlr_dim],
-                                            initializer=tf.constant_initializer(0.0)))
+            for cl in range(nc):
+                with tf.variable_scope('mlp'):
+                    A_mlr.append(tf.get_variable('A_mlr' + str(cl),
+                                                dtype=dtype,
+                                                shape=[1, before_mlr_dim],
+                                                initializer=tf.contrib.layers.xavier_initializer()))
+                    eucl_vars += [A_mlr[cl]]
 
-                if mlr_geom == 'eucl':
-                    eucl_vars += [P_mlr[cl]]
-                    logits_list.append(tf.reshape(util.tf_dot(-P_mlr[cl] + output_ffnn, A_mlr[cl]), [-1]))
+                    P_mlr.append(tf.get_variable('P_mlr' + str(cl),
+                                                dtype=dtype,
+                                                shape=[1, before_mlr_dim],
+                                                initializer=tf.constant_initializer(0.0)))
 
-                elif mlr_geom == 'hyp':
-                    hyp_vars += [P_mlr[cl]]
-                    minus_p_plus_x = util.tf_mob_add(-P_mlr[cl], output_ffnn, c_val)
-                    norm_a = util.tf_norm(A_mlr[cl])
-                    lambda_px = util.tf_lambda_x(minus_p_plus_x, c_val)
-                    # blow-- P+X == [10, 20] tensor. A_mlr is also [10,20]. px_dot_a is [10, 1]
-                    px_dot_a = util.tf_dot(minus_p_plus_x, tf.nn.l2_normalize(A_mlr[cl]))
-                    logit = 2. / np.sqrt(c_val) * norm_a * tf.asinh(np.sqrt(c_val) * px_dot_a * lambda_px)
+                    if mlr_geom == 'eucl':
+                        eucl_vars += [P_mlr[cl]]
+                        logits_list.append(tf.reshape(util.tf_dot(-P_mlr[cl] + output_ffnn, A_mlr[cl]), [-1]))
 
-                    logits_list.append(tf.reshape(logit, [-1]))
+                    elif mlr_geom == 'hyp':
+                        hyp_vars += [P_mlr[cl]]
+                        minus_p_plus_x = util.tf_mob_add(-P_mlr[cl], output_ffnn, c_val)
+                        norm_a = util.tf_norm(A_mlr[cl])
+                        lambda_px = util.tf_lambda_x(minus_p_plus_x, c_val)
+                        # blow-- P+X == [10, 20] tensor. A_mlr is also [10,20]. px_dot_a is [10, 1]
+                        px_dot_a = util.tf_dot(minus_p_plus_x, tf.nn.l2_normalize(A_mlr[cl]))
+                        logit = 2. / np.sqrt(c_val) * norm_a * tf.asinh(np.sqrt(c_val) * px_dot_a * lambda_px)
 
-        model.probs = tf.stack(logits_list, axis=1)
+                        logits_list.append(tf.reshape(logit, [-1]))
+
+            probs = tf.stack(logits_list, axis=1)
+        model.probs = probs
         # print(probs.get_shape())
         # model.probs = tf.reshape(probs, [-1, model.mxlen, nc])
+        model.probs = tf.reshape(probs, [-1, nc])
+        print("reshaped probs", model.probs.get_shape())
+
         print(model.probs.get_shape())
         tf.summary.histogram("probs", model.probs)
 
@@ -504,8 +525,7 @@ class HyperbolicRNNModel(Classifier):
 
         # model.loss = model.create_loss()
         model.loss = tf.reduce_mean(
-            tf.nn.sparse_softmax_cross_entropy_with_logits(labels=model.y,
-logits=model.probs))
+            tf.nn.sparse_softmax_cross_entropy_with_logits(labels=tf.squeeze(model.y),logits=model.probs))
 
         # model.best = tf.argmax(model.probs, axis=1, output_type=tf.int32)
         #     ######################################## OPTIMIZATION ######################################

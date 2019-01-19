@@ -16,7 +16,7 @@
         "reader_type": "default"
     },
     "model": {
-        "model_type": "hyper",
+        "model_type": "lorentz",
         "cfiltsz": [3],
         "hsz": 200,
         "wsz": 30,
@@ -28,9 +28,9 @@
         "cell_type": "rnn",
         "crf": false,
         "lr_words": 0.001,
-        "lr_ffnn": 0.0001,
+        "lr_ffnn": 0.00001,
         "c_val": 1.0,
-        "inputs_geom": "lorentz",
+        "inputs_geom": "hyp",
         "sent_geom": "hyp",
         "ffnn_geom": "hyp",
         "mlr_geom": "hyp",

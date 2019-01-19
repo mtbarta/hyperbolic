@@ -294,6 +294,7 @@ class HyperbolicRNNModel(Tagger):
         eucl_clip = kwargs.get("eucl_clip", 1.0)
         hyp_clip = kwargs.get("hyp_clip", 1.0)
         before_mlr_dim = kwargs.get("before_mlr_dim", nc)
+        learn_softmax = kwargs.get("learn_softmax", True)
         batch_sz = 10
 
         print("C_val:", c_val)
@@ -335,7 +336,13 @@ class HyperbolicRNNModel(Tagger):
         #     embedseq = util.tf_exp_map_zero(embedseq, c_val)
         
         if cell_type == 'rnn' and sent_geom == 'eucl':
-            cell_class = lambda h_dim: tf.contrib.rnn.BasicRNNCell(h_dim)
+            # cell_class = lambda h_dim, layer: tf.contrib.rnn.BasicRNNCell(h_dim)
+            cell_class = lambda h_dim, layer: rnn_impl.EuclRNN(num_units=h_dim,
+                                                       dtype=tf.float64,
+                                                       layer=layer)
+
+        if cell_type == 'lstm' and sent_geom == 'eucl':
+            cell_class = lambda h_dim, layer: tf.nn.rnn_cell.LSTMCell(h_dim, name='lstm'+str(layer))
         if cell_type == 'rnn' and sent_geom == 'hyp':
             cell_class = lambda h_dim, layer: rnn_impl.HypRNN(num_units=h_dim,
                                                        inputs_geom=inputs_geom,
@@ -373,6 +380,7 @@ class HyperbolicRNNModel(Tagger):
         for i in range(layers):
             with tf.variable_scope('rnnLayers', reuse=tf.AUTO_REUSE):
                 if rnntype == 'rnn':
+                    print('training RNN type model')
                     cell = cell_class(hsz, i)
                     initial_state = cell.zero_state(batch_sz, tf.float64)
 
@@ -388,6 +396,8 @@ class HyperbolicRNNModel(Tagger):
                         hyp_vars += cell.hyp_vars
 
                 elif rnntype == 'bi':
+                    print('training bidirectional type model')
+
                     cell_1 = cell_class(hsz, i)
                     cell_2 = cell_class(hsz, i)
 
@@ -472,44 +482,48 @@ class HyperbolicRNNModel(Tagger):
         
         # ################## MLR ###################
         # # output_ffnn is batch_size x before_mlr_dim
+        if not learn_softmax:
+            probs = output_ffnn
+        else:
+            print("learning softmax in hyperbolic space")
+            A_mlr = []
+            P_mlr = []
+            logits_list = []
+            dtype=tf.float64
 
-        A_mlr = []
-        P_mlr = []
-        logits_list = []
-        dtype=tf.float64
-
-        print('output shape', output_ffnn.get_shape())
+            print('output shape', output_ffnn.get_shape())
 
 
-        for cl in range(nc):
-            with tf.variable_scope('mlp'):
-                A_mlr.append(tf.get_variable('A_mlr' + str(cl),
-                                            dtype=dtype,
-                                            shape=[1, before_mlr_dim],
-                                            initializer=tf.contrib.layers.xavier_initializer()))
-                eucl_vars += [A_mlr[cl]]
+            for cl in range(nc):
+                with tf.variable_scope('mlp'):
+                    A_mlr.append(tf.get_variable('A_mlr' + str(cl),
+                                                dtype=dtype,
+                                                shape=[1, before_mlr_dim],
+                                                initializer=tf.contrib.layers.xavier_initializer()))
+                    eucl_vars += [A_mlr[cl]]
 
-                P_mlr.append(tf.get_variable('P_mlr' + str(cl),
-                                            dtype=dtype,
-                                            shape=[1, before_mlr_dim],
-                                            initializer=tf.constant_initializer(0.0)))
+                    P_mlr.append(tf.get_variable('P_mlr' + str(cl),
+                                                dtype=dtype,
+                                                shape=[1, before_mlr_dim],
+                                                initializer=tf.constant_initializer(0.0)))
 
-                if mlr_geom == 'eucl':
-                    eucl_vars += [P_mlr[cl]]
-                    logits_list.append(tf.reshape(util.tf_dot(-P_mlr[cl] + output_ffnn, A_mlr[cl]), [-1]))
+                    if mlr_geom == 'eucl':
+                        eucl_vars += [P_mlr[cl]]
+                        logits_list.append(tf.reshape(util.tf_dot(-P_mlr[cl] + output_ffnn, A_mlr[cl]), [-1]))
 
-                elif mlr_geom == 'hyp':
-                    hyp_vars += [P_mlr[cl]]
-                    minus_p_plus_x = util.tf_mob_add(-P_mlr[cl], output_ffnn, c_val)
-                    norm_a = util.tf_norm(A_mlr[cl])
-                    lambda_px = util.tf_lambda_x(minus_p_plus_x, c_val)
-                    # blow-- P+X == [10, 20] tensor. A_mlr is also [10,20]. px_dot_a is [10, 1]
-                    px_dot_a = util.tf_dot(minus_p_plus_x, tf.nn.l2_normalize(A_mlr[cl]))
-                    logit = 2. / np.sqrt(c_val) * norm_a * tf.asinh(np.sqrt(c_val) * px_dot_a * lambda_px)
+                    elif mlr_geom == 'hyp':
+                        hyp_vars += [P_mlr[cl]]
+                        minus_p_plus_x = util.tf_mob_add(-P_mlr[cl], output_ffnn, c_val)
+                        norm_a = util.tf_norm(A_mlr[cl])
+                        lambda_px = util.tf_lambda_x(minus_p_plus_x, c_val)
+                        # blow-- P+X == [10, 20] tensor. A_mlr is also [10,20]. px_dot_a is [10, 1]
+                        px_dot_a = util.tf_dot(minus_p_plus_x, tf.nn.l2_normalize(A_mlr[cl]))
+                        logit = 2. / np.sqrt(c_val) * norm_a * tf.asinh(np.sqrt(c_val) * px_dot_a * lambda_px)
 
-                    logits_list.append(logit)
+                        logits_list.append(logit)
 
-        probs = tf.stack(logits_list, axis=1)
+            probs = tf.stack(logits_list, axis=1)
+
         print("probs shape", probs.get_shape())
         model.probs = tf.reshape(probs, [-1, model.mxlen, nc])
         print("reshaped probs", model.probs.get_shape())
@@ -587,7 +601,7 @@ class HyperbolicRNNModel(Tagger):
 
         model.summary_merged = tf.summary.merge_all()
 
-        model.test_summary_writer = tf.summary.FileWriter('./runs/hyper/' + str(os.getpid()))
+        model.test_summary_writer = tf.summary.FileWriter('./runs/hyper/' + str(os.getpid()), model.sess.graph)
 
 
         return model

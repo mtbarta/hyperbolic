@@ -16,12 +16,13 @@ from google.protobuf import text_format
 from tensorflow.python.platform import gfile
 from tensorflow.contrib.layers import fully_connected, xavier_initializer
 from baseline.model import Tagger, create_tagger_model, load_tagger_model
-from hyper import minkowski as lorentz
-from hyper import crf
 from hyper import util
+from hyper import rnn_impl
+from hyper.minkowski import LorentzRNN
+import hyper.minkowski as lorentz
 now = datetime.now()
 
-class LorentzRNNModel(Tagger):
+class HyperbolicRNNModel(Tagger):
     def __init__(self):
         super().__init__()
         # self.word_to_id = word_to_id
@@ -248,7 +249,7 @@ class LorentzRNNModel(Tagger):
 
         word_vec = embeddings['word']
         char_vec = embeddings['char']
-        model = LorentzRNNModel()
+        model = HyperbolicRNNModel()
         model.sess = kwargs.get('sess', tf.Session())
 
         model.mxlen = kwargs.get('maxs', 100)
@@ -258,7 +259,8 @@ class LorentzRNNModel(Tagger):
         pdrop = kwargs.get('dropout', 0.5)
         pdrop_in = kwargs.get('dropin', 0.0)
         rnntype = kwargs.get('rnntype', 'blstm')
-        nlayers = kwargs.get('layers', 1)
+        print(rnntype)
+        layers = kwargs.get('layers', 1)
         model.labels = labels
         model.crf = bool(kwargs.get('crf', False))
         model.crf_mask = bool(kwargs.get('crf_mask', False))
@@ -284,7 +286,6 @@ class LorentzRNNModel(Tagger):
         sent_geom = kwargs.get("sent_geom", "hyp")
         mlr_geom = kwargs.get("mlr_geom", "hyp")
         c_val = kwargs.get("c_val", 1.0)
-        # c_val = tf.constant(c_val, dtype=tf.float64)
         cell_non_lin = kwargs.get("cell_non_lin", "id") #"id/relu/tanh/sigmoid."
         ffnn_non_lin = kwargs.get("ffnn_non_lin", "id")
         cell_type = kwargs.get("cell_type", 'rnn')
@@ -294,6 +295,7 @@ class LorentzRNNModel(Tagger):
         eucl_clip = kwargs.get("eucl_clip", 1.0)
         hyp_clip = kwargs.get("hyp_clip", 1.0)
         before_mlr_dim = kwargs.get("before_mlr_dim", nc)
+        learn_softmax = kwargs.get("learn_softmax", True)
         batch_sz = 10
 
         print("C_val:", c_val)
@@ -334,8 +336,7 @@ class LorentzRNNModel(Tagger):
         if cell_type == 'rnn' and sent_geom == 'eucl':
             cell_class = lambda h_dim: tf.contrib.rnn.BasicRNNCell(h_dim)
         if cell_type == 'rnn' and sent_geom == 'hyp':
-            print("using lorentz rnn")
-            cell_class = lambda h_dim: lorentz.LorentzRNN(num_units=h_dim,
+            cell_class = lambda h_dim, layer: LorentzRNN(num_units=h_dim,
                                                        inputs_geom=inputs_geom,
                                                        bias_geom=bias_geom,
                                                        c_val=c_val,
@@ -344,9 +345,9 @@ class LorentzRNNModel(Tagger):
                                                        fix_matrices=False,
                                                        matrices_init_eye=False,
                                                        dtype=tf.float64,
-                                                       bias=False)
+                                                       layer=layer)
         # elif cell_type == 'gru' and sent_geom == 'hyp':
-        #     cell_class = lambda h_dim: rnn_impl.HypGRU(num_units=h_dim,
+        #     cell_class = lambda h_dim, layer: rnn_impl.HypGRU(num_units=h_dim,
         #                                                inputs_geom=inputs_geom,
         #                                                bias_geom=bias_geom,
         #                                                c_val=c_val,
@@ -354,53 +355,68 @@ class LorentzRNNModel(Tagger):
         #                                                fix_biases=False,
         #                                                fix_matrices=False,
         #                                                matrices_init_eye=False,
-        #                                                dtype=tf.float64)
-        
-        if rnntype == 'rnn':
-            cell = cell_class(hsz)
-            initial_state = cell.zero_state(batch_sz, tf.float64)
+        #                                                dtype=tf.float64,
+        #                                                layer=layer)
+        # elif cell_type == 'lstm' and sent_geom == 'hyp':
+        #     cell_class = lambda h_dim, layer: rnn_impl.HypLSTM(num_units=h_dim,
+        #                                                inputs_geom=inputs_geom,
+        #                                                bias_geom=bias_geom,
+        #                                                c_val=c_val,
+        #                                                non_lin=cell_non_lin,
+        #                                                fix_biases=False,
+        #                                                fix_matrices=False,
+        #                                                matrices_init_eye=False,
+        #                                                dtype=tf.float64,
+        #                                                layer=layer)
+        rnnout = embedseq
+        for i in range(layers):
+            with tf.variable_scope('rnnLayers', reuse=tf.AUTO_REUSE):
+                if rnntype == 'rnn':
+                    cell = cell_class(hsz, i)
+                    initial_state = cell.zero_state(batch_sz, tf.float64)
 
-            eucl_vars += cell.eucl_vars
-            if sent_geom == 'hyp':
-                hyp_vars += cell.hyp_vars
-                print(cell.hyp_vars)
-                print(cell.eucl_vars)
+                    # rnnout = tf.contrib.rnn.DropoutWrapper(cell)
+                    rnnout, state = tf.nn.dynamic_rnn(cell,
+                                                    rnnout, \
+                                                    sequence_length=model.lengths,
+                                                    initial_state=initial_state,
+                                                    dtype=tf.float64)
 
-            # rnnout = tf.contrib.rnn.DropoutWrapper(cell)
-            rnnout, state = tf.nn.dynamic_rnn(cell,
-                                              embedseq, \
-                                              sequence_length=model.lengths,
-                                              initial_state=initial_state,
-                                              dtype=tf.float64)
-        elif rnntype == 'bi':
-            cell_1 = cell_class(hsz)
-            cell_2 = cell_class(hsz)
+                    eucl_vars += cell.eucl_vars
+                    if sent_geom == 'hyp':
+                        hyp_vars += cell.hyp_vars
 
-            init_fw = cell_1.zero_state(batch_sz, tf.float64)
-            init_bw = cell_2.zero_state(batch_sz, tf.flaot64)
+                elif rnntype == 'bi':
+                    cell_1 = cell_class(hsz, i)
+                    cell_2 = cell_class(hsz, i)
 
-            eucl_vars += cell_1.eucl_vars + cell_2.eucl_vars
-            if sent_geom == 'hyp':
-                hyp_vars += cell_1.hyp_vars + cell_2.hyp_vars
+                    init_fw = cell_1.zero_state(batch_sz, tf.float64)
+                    init_bw = cell_2.zero_state(batch_sz, tf.float64)
 
-            rnnout, state = tf.nn.bidirectional_dynamic_rnn(cell_1, 
-                                                            cell_2, 
-                                                            embedseq,
-                                                            initial_state_fw=init_fw,
-                                                            initial_state_bw=init_bw,
-                                                            sequence_length=model.lengths,
-                                                            dtype=tf.float64)
-            rnnout = tf.concat(axis=2, values=rnnout)
-        else:
-            cell = cell_class(hsz)
 
-            eucl_vars += cell.eucl_vars
-            if sent_geom == 'hyp':
-                hyp_vars += cell.hyp_vars
+                    rnnout, state = tf.nn.bidirectional_dynamic_rnn(cell_1, 
+                                                                    cell_2, 
+                                                                    rnnout,
+                                                                    initial_state_fw=init_fw,
+                                                                    initial_state_bw=init_bw,
+                                                                    sequence_length=model.lengths,
+                                                                    dtype=tf.float64)
+                    rnnout = tf.concat(axis=2, values=rnnout)
 
-                
-            # rnnout = tf.contrib.rnn.DropoutWrapper(cell)
-            rnnout, state = tf.nn.dynamic_rnn(cell, embedseq, sequence_length=model.lengths, dtype=tf.float64)
+                    eucl_vars += cell_1.eucl_vars + cell_2.eucl_vars
+                    if sent_geom == 'hyp':
+                        hyp_vars += cell_1.hyp_vars + cell_2.hyp_vars
+
+                else:
+                    cell = cell_class(hsz)
+   
+                    # rnnout = tf.contrib.rnn.DropoutWrapper(cell)
+                    rnnout, state = tf.nn.dynamic_rnn(cell, rnnout, sequence_length=model.lengths, dtype=tf.float64)
+
+                    eucl_vars += cell.eucl_vars
+                    if sent_geom == 'hyp':
+                        hyp_vars += cell.hyp_vars
+
         # rnnout = tf.Print(rnnout, [rnnout], message="rnnout")
 
         tf.summary.histogram('RNN/rnnout', rnnout)
@@ -409,101 +425,95 @@ class LorentzRNNModel(Tagger):
         hout = rnnout.get_shape()[-1]
         print(rnnout.get_shape())
         # # Flatten from [B x T x H] - > [BT x H]
-        rnnout_bt_x_h = tf.reshape(rnnout, [-1, hout])
-        # rnnout_bt_x_h = tf.Print(rnnout_bt_x_h, [rnnout_bt_x_h], message="rnnout_bt_x_h")
+        with tf.variable_scope("fc"):
+            rnnout_bt_x_h = tf.reshape(rnnout, [-1, hout])
+            # rnnout_bt_x_h = tf.Print(rnnout_bt_x_h, [rnnout_bt_x_h], message="rnnout_bt_x_h")
 
-        ################## first feed forward layer ###################
+            ################## first feed forward layer ###################
 
-        # Define variables for the first feed-forward layer: W1 * s1 + W2 * s2 + b + bd * d(s1,s2)
-        W_ff_s1 = tf.get_variable('W_ff_s1',
-                                  dtype=tf.float64,
-                                  shape=[hout, before_mlr_dim],  # 400, 20 -- 20 number of classes
-                                  initializer= tf.contrib.layers.xavier_initializer(dtype=tf.float64))
+            # Define variables for the first feed-forward layer: W1 * s1 + W2 * s2 + b + bd * d(s1,s2)
+            W_ff_s1 = tf.get_variable('W_ff_s1',
+                                    dtype=tf.float64,
+                                    shape=[hout, before_mlr_dim],  # 400, 20 -- 20 number of classes
+                                    initializer= tf.contrib.layers.xavier_initializer(dtype=tf.float64))
 
-        tf.summary.histogram("W_ff_s1", W_ff_s1)
+            tf.summary.histogram("W_ff_s1", W_ff_s1)
 
-        b_ff = tf.get_variable('b_ff',
-                               dtype=tf.float64,
-                               shape=[1, before_mlr_dim],
-                               initializer=tf.constant_initializer(0.0))
+            # b_ff = tf.get_variable('b_ff',
+            #                        dtype=tf.float64,
+            #                        shape=[1, before_mlr_dim],
+            #                        initializer=tf.constant_initializer(0.0))
 
-        # TODO(MB): ffn should be in hyperbolic space, no?
-        eucl_vars += [W_ff_s1]
+            # # TODO(MB): ffn should be in hyperbolic space, no?
+            eucl_vars += [W_ff_s1]
 
-        hyp_vars += [b_ff]
+            # hyp_vars += [b_ff]
+            
+            # #### treat W as an update in tangent space
+            # # ffnn_s1 = rnnout_bt_x_h + W_ff_s1 + b_ff
+            # # cheat for now. i don't know how to multiply these together first
+            ffnn_s1 = lorentz.tf_mink_dot_matrix(rnnout_bt_x_h, tf.transpose(W_ff_s1))
+            # ffnn_s1 = W_ff_s1 +  dotp * rnnout_bt_x_h
+            # #### embed back into minkowski space
+            # ffnn_s1 = lorentz.tf_exp_map_x(rnnout_bt_x_h, ffnn_s1, c_val)
 
-        print('rnnout_bt_x_h', rnnout_bt_x_h.get_shape())
-        print('W_ff_s1', W_ff_s1.get_shape())
-        # ffnn_s1 = util.tf_mob_mat_mul(W_ff_s1, rnnout_bt_x_h, c_val)
-        ffnn_s1 = lorentz.tf_mink_dot_matrix(rnnout_bt_x_h, tf.transpose(W_ff_s1))
-        print('ffnn', ffnn_s1.get_shape())
-        # w == (800, 20)
-        # rnnout == (b*t, hout) == (10 * 124, 800)
-        tf.summary.histogram("ffnn_s1", ffnn_s1)
+            # print('ffnn', ffnn_s1.get_shape())
+            # tf.summary.histogram("ffnn_s1", ffnn_s1)
 
-        # output_ffnn = util.tf_mob_add(ffnn_s1, b_ff, c_val)
-        output_ffnn = ffnn_s1 #+ b_ff
-        output_ffnn = util.tf_hyp_non_lin(output_ffnn,
-                                              non_lin=ffnn_non_lin,
-                                              hyp_output = True, #(mlr_geom == 'hyp'),
-                                              c=c_val)
+            output_ffnn = util.tf_hyp_non_lin(ffnn_s1,
+                                                non_lin=ffnn_non_lin,
+                                                hyp_output = True, #(mlr_geom == 'hyp'),
+                                                c=c_val)
         tf.summary.histogram("output_ffnn", output_ffnn)
         # output_ffnn = tf.Print(output_ffnn, [output_ffnn], message="output_ffnn")
-
-        # Mobius dropout
-        # if dropout < 1.0:
-        #     # If we are here, then output_ffnn should be Euclidean.
-        #     output_ffnn = tf.nn.dropout(output_ffnn, keep_prob=model.pkeep)
-        #     if (mlr_geom == 'hyp'):
-        #         output_ffnn = util.tf_exp_map_zero(output_ffnn, c_val)
-
-
+        # output_ffnn = dotp
         
         # ################## MLR ###################
         # # output_ffnn is batch_size x before_mlr_dim
+        if not learn_softmax:
+            probs = output_ffnn
+        else:
+            print("learning softmax in hyperbolic space")
+            A_mlr = []
+            P_mlr = []
+            logits_list = []
+            dtype=tf.float64
 
-        # A_mlr = []
-        # P_mlr = []
-        # logits_list = []
-        # dtype=tf.float64
+            print('output shape', output_ffnn.get_shape())
 
-        # print('output shape', output_ffnn.get_shape())
+            with tf.variable_scope("hyper_softmax"):
+                for cl in range(nc):
+                    with tf.variable_scope('mlp'):
+                        A_mlr.append(tf.get_variable('A_mlr' + str(cl),
+                                                    dtype=dtype,
+                                                    shape=[1, before_mlr_dim],
+                                                    initializer=tf.contrib.layers.xavier_initializer()))
+                        eucl_vars += [A_mlr[cl]]
 
+                        P_mlr.append(tf.get_variable('P_mlr' + str(cl),
+                                                    dtype=dtype,
+                                                    shape=[1, before_mlr_dim],
+                                                    initializer=tf.constant_initializer(0.0)))
 
-        # for cl in range(nc):
-        #     with tf.variable_scope('mlp'):
-        #         A_mlr.append(tf.get_variable('A_mlr' + str(cl),
-        #                                     dtype=dtype,
-        #                                     shape=[1, before_mlr_dim],
-        #                                     initializer=tf.contrib.layers.xavier_initializer()))
-        #         eucl_vars += [A_mlr[cl]]
+                        if mlr_geom == 'eucl':
+                            eucl_vars += [P_mlr[cl]]
+                            logits_list.append(tf.reshape(util.tf_dot(-P_mlr[cl] + output_ffnn, A_mlr[cl]), [-1]))
 
-        #         P_mlr.append(tf.get_variable('P_mlr' + str(cl),
-        #                                     dtype=dtype,
-        #                                     shape=[1, before_mlr_dim],
-        #                                     initializer=tf.constant_initializer(0.0)))
+                        elif mlr_geom == 'hyp':
+                            hyp_vars += [P_mlr[cl]]
+                            minus_p_plus_x = util.tf_mob_add(-P_mlr[cl], output_ffnn, c_val)
+                            norm_a = util.tf_norm(A_mlr[cl])
+                            lambda_px = util.tf_lambda_x(minus_p_plus_x, c_val)
+                            # blow-- P+X == [10, 20] tensor. A_mlr is also [10,20]. px_dot_a is [10, 1]
+                            px_dot_a = util.tf_dot(minus_p_plus_x, tf.nn.l2_normalize(A_mlr[cl]))
+                            logit = 2. / np.sqrt(c_val) * norm_a * tf.asinh(np.sqrt(c_val) * px_dot_a * lambda_px)
 
-        #         if mlr_geom == 'eucl':
-        #             eucl_vars += [P_mlr[cl]]
-        #             logits_list.append(tf.reshape(util.tf_dot(-P_mlr[cl] + output_ffnn, A_mlr[cl]), [-1]))
+                            logits_list.append(logit)
 
-        #         elif mlr_geom == 'hyp':
-        #             hyp_vars += [P_mlr[cl]]
-        #             minus_p_plus_x = util.tf_mob_add(-P_mlr[cl], output_ffnn, c_val)
-        #             norm_a = util.tf_norm(A_mlr[cl])
-        #             lambda_px = util.tf_lambda_x(minus_p_plus_x, c_val)
-        #             # blow-- P+X == [10, 20] tensor. A_mlr is also [10,20]. px_dot_a is [10, 1]
-        #             px_dot_a = util.tf_dot(minus_p_plus_x, tf.nn.l2_normalize(A_mlr[cl]))
-        #             logit = 2. / tf.sqrt(c_val) * norm_a * tf.asinh(tf.sqrt(c_val) * px_dot_a * lambda_px)
+        probs = tf.stack(logits_list, axis=1)
 
-        #             logits_list.append(logit)
-
-        # probs = tf.stack(logits_list, axis=1)
-        # print("probs shape", probs.get_shape())
-        # model.probs = tf.reshape(probs, [-1, model.mxlen, nc])
-        model.probs = tf.reshape(output_ffnn, [-1, model.mxlen, nc])
-
-
+        print("probs shape", probs.get_shape())
+        model.probs = tf.reshape(probs, [-1, model.mxlen, nc])
         print("reshaped probs", model.probs.get_shape())
         tf.summary.histogram("probs", model.probs)
 
@@ -566,9 +576,6 @@ class LorentzRNNModel(Tagger):
 
         if len(hyp_vars) > 0:
             hyp_grads = tf.gradients(model.loss, hyp_vars)
-            print(hyp_vars)
-            print(model.loss)
-            print(hyp_grads)
             capped_hyp_grads = [tf.clip_by_norm(grad, hyp_clip) for grad in hyp_grads]  ###### Clip gradients
 
 
@@ -582,14 +589,14 @@ class LorentzRNNModel(Tagger):
 
         model.summary_merged = tf.summary.merge_all()
 
-        model.test_summary_writer = tf.summary.FileWriter('./runs/hyper/' + str(os.getpid()))
+        model.test_summary_writer = tf.summary.FileWriter('./runs/hyper/' + str(os.getpid()), model.sess.graph)
 
 
         return model
 
 def create_model(labels, embeddings, **kwargs):
-    return LorentzRNNModel.create(labels, embeddings, **kwargs)
+    return HyperbolicRNNModel.create(labels, embeddings, **kwargs)
 
 
 def load_model(modelname, **kwargs):
-    return LorentzNNModel.load(modelname, **kwargs)
+    return HyperbolicRNNModel.load(modelname, **kwargs)

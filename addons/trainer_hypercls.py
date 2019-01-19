@@ -59,11 +59,13 @@ class HyperbolicTrainer(EpochReportingTrainer):
         return metrics
 
     def _train(self, ts, debug=False):
+        debug=True
         total_loss = 0
-        steps = len(ts)
+        steps = len(ts) if not debug else 2
 
         metrics = {}
         pg = create_progress_bar(steps)
+        count = 0
         for batch_dict in ts:
             feed_dict = self.model.make_input(batch_dict, do_dropout=True)
             preds, lossv, _, summs = self.model.sess.run([self.model.probs, self.model.loss, self.model.all_optimizer_var_updates_op, self.model.summary_merged], feed_dict=feed_dict)
@@ -71,6 +73,9 @@ class HyperbolicTrainer(EpochReportingTrainer):
             total_loss += lossv
             self.model.test_summary_writer.add_summary(summs)
             pg.update()
+            count += 1
+            if debug and count==2:
+                break
         pg.done()
         metrics['avg_loss'] = float(total_loss)/steps
         return metrics

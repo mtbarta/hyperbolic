@@ -31,7 +31,7 @@ def tf_norm(x):
 
 def tf_dot(x, y):
     # return tf.reduce_sum(tf.multiply(x, y), axis=1, keepdims=True)
-    return tf.matmul(x, y)
+    return tf.matmul(x, y) + EPS
 
 # Hyperbolic distance
 # def dist(u,v):
@@ -39,36 +39,66 @@ def tf_dot(x, y):
 #     uu = 1. + z/((1-np.linalg.norm(u)**2)*(1-np.linalg.norm(v)**2))
 #     return acosh(uu)
 
-def mink_dot_matrix(a, b, dim=1):
-    rank = a.shape[dim] - 1
-    euc_dps = a[:, :rank].dot(b[:,:rank].T)
-    timelike = a[:,rank][:,np.newaxis].dot(b[:,rank][:,np.newaxis].T)
-    return euc_dps - timelike
+
+# def tf_mink_dot_matrix(a, b, dim=1):
+#     rank = a.get_shape()[dim] - 1
+
+#     # flip_velocity = np.asarray([1 for _ in range(rank)] + [-1])
+#     # flip_velocity = tf.constant(flip_velocity, dtype=tf.float64)
+#     # flip_velocity = a * flip_velocity + EPS
+#     # res = tf_dot(flip_velocity, tf.transpose(b)) + EPS
+#     a_euc = a[:, :rank]
+#     b_euc = tf.transpose(b[:, :rank])
+#     # print('a_euc', a_euc.get_shape())
+#     # print('b_euc', b_euc.get_shape())
+
+#     timelike_a = a[:,rank][:, tf.newaxis]
+#     timelike_b = tf.transpose(b[:, rank][:, tf.newaxis])
+
+#     euc_dps = tf_dot(a_euc, b_euc)
+#     # print('euc_dps', euc_dps.get_shape())
+#     timelike = tf_dot(timelike_a, timelike_b)
+#     # print('timelike', timelike.get_shape())
+
+#     # res = tf.stack([euc_dps, timelike], axis=-1)
+#     # res = tf.reshape(res, [])
+#     # print('res', res.get_shape())
+#     return tf.subtract(euc_dps, timelike)
 
 def tf_mink_dot_matrix(a, b, dim=1):
-    # print('mink_dot a shape', a.get_shape())
-    rank = tf.shape(a)[dim] - 1
-    
-    a_euc = a[:, :rank]
-    b_euc = tf.transpose(b[:, :rank])
-    # print('a_euc', a_euc.get_shape())
-    # print('b_euc', b_euc.get_shape())
+    one = tf.reduce_sum(tf.matmul(a[:,:-1], tf.transpose(b[:,:-1])))
+    two = tf.multiply(tf.cast(2., tf.float64), tf.matmul(a[:,-1][:, tf.newaxis], tf.transpose(b[:,-1][:, tf.newaxis])))
 
-    timelike_a = a[:,rank][:, tf.newaxis]
-    timelike_b = tf.transpose(b[:, rank][:, tf.newaxis])
-
-    euc_dps = tf_dot(a_euc, b_euc)
-    # print('euc_dps', euc_dps.get_shape())
-    timelike = tf_dot(timelike_a, timelike_b)
-    # print('timelike', timelike.get_shape())
-
-    return tf.subtract(euc_dps, timelike)
+    return tf.subtract(one, two)
 
 # def tf_hyper_add(u, v):
 #     numer = tf.add(u, v)
 #     denom = 
 
-    
+def tf_logarithm(base, other):
+    """
+    Return the logarithm of `other` in the tangent space of `base`.
+    """
+    mdp = tf_mink_dot_matrix(base, other)
+    dist = tf.acosh(-mdp)
+    proj = other + (mdp * base)
+    norm = tf.sqrt(tf_mink_dot_matrix(proj, proj)) 
+    proj *= dist / norm
+    return proj
+
+def tf_geodesic_parallel_transport(base, tangent):
+    """
+    Parallel transport `tangent`, a tangent vector at point `base`, along the
+    geodesic in the direction `direction` (another tangent vector at point
+    `base`, not necessarily unit length)
+    """
+    direction = tf_logarithm(base, tangent)
+    norm_direction = tf.sqrt(tf_mink_dot_matrix(direction, direction))
+    unit_direction = direction / norm_direction
+    parallel_component = tf_mink_dot_matrix(tangent, unit_direction)
+    unit_direction_transported = tf_sinh(norm_direction) * base + tf_cosh(norm_direction) * unit_direction
+    return parallel_component * unit_direction_transported + tangent - parallel_component * unit_direction 
+
 
 def tf_exp_map_x(x, v, c):
     """https://research.fb.com/wp-content/uploads/2018/07/Learning-Continuous-Hierarchies-in-the-Lorentz-Model-of-Hyperbolic-Geometry.pdf?
@@ -80,52 +110,6 @@ def tf_exp_map_x(x, v, c):
     second_term = tf_cosh(np.sqrt(c) * norm_v) * x + tf_sinh(np.sqrt(c) * norm_v) * (v / norm_v)
     # second_term = (tf_tanh(np.sqrt(c) * tf_lambda_x(x, c) * norm_v / 2) / (np.sqrt(c) * norm_v)) * v
     return second_term
-
-# def tf_log_map_x(x, y, c):
-#     diff = tf_mob_add(-x, y, c) + EPS
-#     norm_diff = tf_norm(diff)
-#     lam = tf_lambda_x(x, c)
-#     return ( ( (2. / np.sqrt(c)) / lam) * tf_atanh(np.sqrt(c) * norm_diff) / norm_diff) * diff
-
-# def tf_mob_scalar_mul(r, v, c):
-#     v = v + EPS
-#     norm_v = tf_norm(v)
-#     nomin = tf_tanh(r * tf_atanh(np.sqrt(c) * norm_v))
-#     result= nomin / (np.sqrt(c) * norm_v) * v
-#     return tf_project_hyp_vecs(result, c)
-
-def tf_einstein_addition(u, v, c=1.0):
-    # proper velocity space model and proper velocity addition
-    # https://en.wikipedia.org/wiki/Gyrovector_space
-    print("einstein_addition")
-    print("u", u.get_shape())
-    print("v", v.get_shape())
-
-    s = tf.add(u, v)
-    bta = beta_factor(u, c)
-    print('beta factor u', bta.get_shape())
-    inner =  bta / (1.0 + bta)
-    # inner should be size of beta_u -- (10, 800)
-    # inner = tf.divide(beta_factor(u, c), tf.add(tf.constant(1, dtype=tf.float64), beta_factor(u, c)))
-    inner2 = tf.matmul(u,v) # should be (10, 10).
-    inner3 = tf.divide(tf.subtract(1.0, beta_factor(v, c)), beta_factor(v, c))
-    # inner3 should be same size as beta_v -- (10, 800)
-
-    print("inner", inner.get_shape())
-    print("inner2", inner2.get_shape())
-    total_inner = tf.add(tf_mink_dot_matrix(inner, inner2), tf.transpose(inner3))
-    # this becomes a matmul btwn (10, 800) and (10, 10)
-    print('total_inner', total_inner.get_shape())
-    print("inner2", inner2.get_shape())
-    t = tf_mink_dot_matrix(total_inner, u)
-    # total inner should be (10, 800)
-    print("ein_add_s", s.get_shape())
-    print("ein_add_t", t.get_shape())
-    return tf.add(s, t)
-
-def beta_factor(vec, c):
-    denom = np.sqrt(tf.add(tf.constant(1, dtype=tf.float64), tf.pow(tf_norm(vec), 2)))
-    return tf.divide(tf.constant(1, dtype=tf.float64), denom)
 
 class LorentzRNN(tf.nn.rnn_cell.RNNCell):
 
@@ -139,13 +123,15 @@ class LorentzRNN(tf.nn.rnn_cell.RNNCell):
                  fix_matrices,
                  matrices_init_eye,
                  dtype,
-                 bias=True):
+                 bias=True,
+                 layer=0):
         self._num_units = num_units
         self.c_val = c_val
         self.built = False
         self.__dtype = dtype
         self.non_lin = non_lin
         self.bias = bias
+        self.layer=layer
         assert self.non_lin in ['id', 'relu', 'tanh', 'sigmoid']
 
         self.bias_geom = bias_geom
@@ -158,7 +144,8 @@ class LorentzRNN(tf.nn.rnn_cell.RNNCell):
         if matrices_init_eye or self.fix_matrices:
             self.matrix_initializer = tf.initializers.identity()
         else:
-            self.matrix_initializer = tf.contrib.layers.xavier_initializer()
+            self.matrix_initializer = tf.truncated_normal_initializer(0.0001, .00001)
+            # self.matrix_initializer = tf.contrib.layers.xavier_initializer()
 
         self.eucl_vars = []
         self.hyp_vars = []
@@ -173,33 +160,15 @@ class LorentzRNN(tf.nn.rnn_cell.RNNCell):
 
     # Performs the hyperbolic version of the operation Wh + Ux + b.
     def one_rnn_transform(self, W, h, U, x, b):
-        # hyp_x = x
-        # if self.inputs_geom == 'eucl':
-        #     hyp_x = util.tf_exp_map_x(x, self.c_val)
-
-        hyp_b = b
-        # if self.bias_geom == 'eucl':
-        #     hyp_b = util.tf_exp_map_x(b, self.c_val)
-
-        # W_otimes_h = util.tf_mob_mat_mul(W, h, self.c_val)
-        # U_otimes_x = util.tf_mob_mat_mul(U, hyp_x, self.c_val)
-        # Wh_plus_Ux = util.tf_mob_add(W_otimes_h, U_otimes_x, self.c_val)
-        # result = util.tf_mob_add(Wh_plus_Ux, hyp_b, self.c_val)
-        # print('h', h.get_shape())
-        # print('W', W.get_shape())
-        # print('x', x.get_shape()) # (?, 50)
-        # print('U', U.get_shape()) # (50, 800)
-
         W_x_h = tf_mink_dot_matrix(h, W) #becomes (10, 800)
-        U_x_h = tf_mink_dot_matrix(x, tf.transpose(U)) #becomes (?, 50)
-
-        # print('W_x_h', W_x_h.get_shape())
-        # print("U_x_h", U_x_h.get_shape())
-        result =  W_x_h + U_x_h
-        # result = tf_einstein_addition(W_x_h, U_x_h, self.c_val)
-        # if self.bias:
-        #     # result is probably not commutative, this math doesn't hold
-        #     result = result + (hyp_b / tf_)
+        # W_x_h = tf_geodesic_parallel_transport(h, W)
+        
+        # W_x_h = tf.Print(W_x_h, [W_x_h], 'W_x_h')
+        U_x_h = tf_mink_dot_matrix(x, tf.transpose(U)) + EPS #becomes (?, 50)
+        # U_x_h = tf_geodesic_parallel_transport(x, tf.transpose(U))
+        # U_x_h = tf.Print(U_x_h, [U_x_h], 'U_x_h')
+        result = W_x_h + U_x_h + b
+        # result = tf.Print(result, [result], 'result')
 
         return result
 
@@ -215,25 +184,25 @@ class LorentzRNN(tf.nn.rnn_cell.RNNCell):
                 input_depth = inputs_shape[1].value
 
                 self.W = tf.get_variable(
-                    'W', dtype= self.__dtype,
+                    'W'+str(self.layer), dtype= self.__dtype,
                     shape=[self._num_units, self._num_units],
                     trainable=(not self.fix_matrices),
                     initializer=self.matrix_initializer)
                 if not self.fix_matrices:
-                    print('appending W matrix to hyp_vars')
-                    self.hyp_vars.append(self.W)
+                    # print('appending W matrix to hyp_vars')
+                    self.eucl_vars.append(self.W)
 
                 self.U = tf.get_variable(
-                    'U', dtype= self.__dtype,
+                    'U'+str(self.layer), dtype= self.__dtype,
                     shape=[input_depth, self._num_units],
                     trainable=(not self.fix_matrices),
                     initializer=self.matrix_initializer)
                 if not self.fix_matrices:
-                    print("appending U matrix to hyp_vars")
-                    self.hyp_vars.append(self.U)
+                    # print("appending U matrix to hyp_vars")
+                    self.eucl_vars.append(self.U)
 
                 self.b = tf.get_variable(
-                    'b', dtype= self.__dtype,
+                    'b'+str(self.layer), dtype= self.__dtype,
                     shape=[1, self._num_units],
                     trainable=(not self.fix_biases),
                     initializer=tf.constant_initializer(0.0))
